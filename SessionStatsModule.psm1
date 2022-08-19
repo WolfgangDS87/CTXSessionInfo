@@ -14,7 +14,7 @@
         [String]$AdminAddress
     )
     
-    $logPath = "C:\temp\SessionInfo"
+    $logPath = "C:\temp\"
     $domain = (Get-ADDomain).name
     
     #Write-host "Please type user ID without domain info"
@@ -23,7 +23,7 @@
         $XASessions = Get-BrokerSession -AdminAddress $AdminAddress -UserName 
     }
     Else{
-    $XASessions = Get-BrokerSession -UserName "$domain\$user"
+        $XASessions = Get-BrokerSession -UserName "$domain\$user"
     }
     $sessionInfo = @()
     

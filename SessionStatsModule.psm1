@@ -22,8 +22,9 @@
     IF($AdminAddress){
         $XASessions = Get-BrokerSession -AdminAddress $AdminAddress -UserName 
     }
-
+    Else{
     $XASessions = Get-BrokerSession -UserName "$domain\$user"
+    }
     $sessionInfo = @()
     
     #need to add detection for Quser returning a non active state since CTXSession only reports on live sessions

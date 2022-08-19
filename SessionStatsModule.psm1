@@ -14,7 +14,7 @@
         [String]$AdminAddress
     )
     
-    $logPath = "\\dc1-na1b\dc1-share28\pkgsrc\_ProjectScripts\Misc\Logging\SessionInfo"
+    $logPath = "C:\temp\SessionInfo"
     $domain = (Get-ADDomain).name
     
     #Write-host "Please type user ID without domain info"

@@ -14,7 +14,7 @@
         [String]$AdminAddress
     )
     
-    $logPath = "C:\temp"
+    IF(!$LogPath){$logPath = "C:\temp"}
     $domain = (Get-ADDomain).name
     
     #Write-host "Please type user ID without domain info"

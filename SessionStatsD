@@ -1,0 +1,183 @@
+Function Get-CTXCloudMonitorData{
+    param(
+        [Parameter(Mandatory=$True)]
+        [string]$uri,
+        [int]$timeOut
+       #[switch]$AsJob
+ 
+    )
+
+    $masterResults = @()
+    #buildes the auth headers off global variables, requires user to be connected to the Citrix cloud
+    $headers = @{'Citrix-CustomerId'=$GLOBAL:XDSDKProxy.Split(".")[0];'Authorization'=$GLOBAL:XDAuthToken}
+    #sets default timeout to 15 seconds if not set by command
+    if(!($timeOut)){$timeOut = 15}
+    $time = 0
+    While($time -lt $timeOut)
+    {
+        Start-Sleep -Seconds $time
+        try {
+        # Make the HTTP request
+        $response = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -Verbose
+        $time = $timeOut
+        }
+        catch {
+        # Check if the error is a 429 error
+            if ($_.Exception.Response.StatusCode -eq 429) {
+                Write-Host "429 Error: Concurrency Limit Exceeded"
+                if ($time -ge $timeOut){
+                    Return = "429 timeout limit hit"
+                }
+                else{
+                    $time++
+                }
+            }
+            else {
+                # Handle other types of errors
+                Return $_.Exception.Message
+                $time = $timeOut
+            }
+        }
+    }
+    while($response.'@odata.nextLink'){
+        $masterResults += $response.value
+        #$newURI = "$api/ApplicationFaults?" + (($response.'@odata.nextLink').Split("?"))[1]
+        $newURI = $response.'@odata.nextLink'
+        $time = 0
+        While($time -lt $timeOut)
+        {
+            Start-Sleep -Seconds $time
+            try {
+            # Make the HTTP request
+            $response = Invoke-RestMethod -Uri $newURI -Method Get -Headers $headers -Verbose
+            $time = $timeOut
+            }
+            catch {
+            # Check if the error is a 429 error
+                if ($_.Exception.Response.StatusCode -eq 429) {
+                    Write-Host "429 Error: Concurrency Limit Exceeded"
+                    if ($time -ge $timeOut){
+                        Return = "429 timeout limit hit"
+                }
+                else{
+                    $time++
+                    }
+                }
+                else {
+                    # Handle other types of errors
+                    Return = $_.Exception.Message
+                    $time = $timeOut
+                }
+            }
+        }
+    }
+    $masterResults += $response.value
+
+    Return $masterResults
+}
+
+
+Function Get-CTXCloudSessionData {
+    param(
+        [string]$user,
+        [DateTime]$LaunchDate,
+        [int]$timeOut,
+        [switch]$raw
+       #[switch]$AsJob
+ 
+    )
+
+    $api = "https://api-us.cloud.com/monitorodata"
+    #Checks paramaters and sets to their defaults or in the case of date converts to UTC in a string format that OData can process
+    If(!($LaunchDate -eq $null)){
+        $StartTime = $LaunchDate.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffZ")
+        #Write-host "I Found the date and made it $StartTime"        
+    }
+    Else{
+        $StartTime = (Get-Date).adddays(-1).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.ffZ")
+        #Write-host "I Didn't find the date so I made it $StartTime"
+    }
+    If(!($timeOut)){$timeout = 15}
+    If(!($user)){
+        $query = "Sessions?`$filter=StartDate gt $StartTime &`$expand=User,Connections,Machine,SessionAutoReconnects,ApplicationInstances(`$expand=Application(`$select=PublishedName))"
+        #$query
+    }
+    Else{
+        $usersURL = "$api/Users?`$filter=UserName eq '$user'"
+        $userResponse = Get-CTXCloudMonitorData -uri $usersURL -timeOut $timeOut 
+        $query="Sessions?`$filter=UserID eq $($userResponse.ID) and StartDate gt $StartTime &`$expand=User,Connections,Machine,SessionAutoReconnects,ApplicationInstances(`$expand=Application(`$select=PublishedName)),ApplicationFaults"
+    }
+    $uri = "$api/$query"
+    $response = Get-CTXCloudMonitorData -uri $uri -timeOut $timeOut 
+
+    #filters the response from CloutMonitorData to a more readable format if $raw is not set
+    If($response.GetType().Name -match "Object" -and $raw -ne $True){
+        $masterResponse = @()
+        Foreach($session in $response){
+
+            $sessionKey = $session.SessionKey
+            $query = "SessionMetrics?`$filter=SessionId eq $sessionKey"
+            $uri = "$api/$query"
+            $sessionMetrics = Get-CTXCloudMonitorData -uri $uri -timeOut $timeOut 
+            $icaBest = 10000
+            $icaWorst = 0
+            $icaRtt = @()
+
+            foreach($metric in $sessionMetrics)
+            {
+                $icaRtt += $metric.IcaRttMS
+                if($metric.IcaRttMS -gt $icaWorst)
+                {
+                    $icaWorst = $metric.IcaRttMS
+                }
+
+                if($metric.IcaRttMS -lt $icaBest)
+                {
+                    $icaBest = $metric.IcaRttMS
+                }
+            }
+
+            $icaAvg = [Math]::Round(($icaRtt | Measure-Object -Sum).Sum / $icaRtt.count)
+
+            $filteredResponse = [PSCustomObject]@{
+            Username = $session.User.UserName
+            Domain = $session.User.Domain
+            FullName = $session.User.FullName
+            UPN = $session.User.UPN
+            Sid = $session.User.Sid
+            SessionKey = $sessionKey
+            ICA_Best = $icaBest
+            ICA_Worst = $icaWorst
+            ICA_Avg = $icaAvg
+            StartTime = $session.StartDate
+            EndDate = $session.EndDate
+            AppsLaunched = $session.ApplicationInstances.Application.PublishedName
+            ClosedApplications = $session.ApplicationInstances | ? {$_.Enddate -ne $null} | Select @{LABEL='PublishedName';Expression={$_.Application.PublishedName}},StartDate,EndDate,CreatedDate
+            CurrentApplications = $session.ApplicationInstances | ? {$_.Enddate -eq $null} | Select @{LABEL='PublishedName';Expression={$_.Application.PublishedName}},StartDate,CreatedDate
+            #These are oneliners that took me less time than I thought they would to come up with... basically they grab connections and compare to session reconnects and tie the reconnects to the sessions. There is a line for the current active connection and every previous connection.
+            CurrentConnection = $session.Connections | ? {$_.ID -match $session.CurrentConnectionID} | Select ClientName,ClientVersion,ClientPlatform,ClientAddress,ConnectedViaIPAddress,LaunchedViaIpAddress,isReconnect,ClientSessionValidateDate,ServerSessionValidateDate,Protocol,BrokeringDate,@{LABEL='Reconnections';Expression={($session.SessionAutoReconnects.ConnectionID  -match $_.ID | Measure-Object).count}},@{LABEL='ReconnectionTimes';Expression={ForEach($reconnect in $session.SessionAutoReconnects){If($reconnect.ConnectionID -match $_.ID){$reconnect.EventTimeStamp}}}}
+            PastConnections = $session.Connections | ? {$_.ID -notmatch $session.CurrentConnectionID} | Select ClientName,ClientVersion,ClientPlatform,ClientAddress,ConnectedViaIPAddress,LaunchedViaIpAddress,isReconnect,ClientSessionValidateDate,ServerSessionValidateDate,Protocol,BrokeringDate,@{LABEL='Reconnections';Expression={($session.SessionAutoReconnects.ConnectionID  -match $_.ID | Measure-Object).count}},@{LABEL='ReconnectionTimes';Expression={ForEach($reconnect in $session.SessionAutoReconnects){If($reconnect.ConnectionID -match $_.ID){$reconnect.EventTimeStamp}}}}
+            SessionAutoReconnects = ($session.SessionAutoReconnects).Count
+            Machine = $session.Machine.DNSName
+            MachineIP = $session.Machine.IpAddress
+            MachineAgentVersion = $session.Machine.AgentVersion
+            ControllerDNSName = $session.Machine.ControllerDNSName
+            PoweredOnDate = $session.Machine.PoweredOnDate
+            PowerStateChangeDate = $session.Machine.PowerStateChangeDate
+            MachineRegistrationChangeDate = $session.Machine.RegistrationStateChangeDate
+            MachineLastDeregistration = $session.Machine.LastDeregisteredDate
+            MachineLastDergReason = $Session.Machine.LastDeregisteredCode
+            MachineCurrentSessionCount = $Session.Machine.CurrentSessionCount
+            DesktopGroup = (Get-BrokerDesktopGroup -UUID $Session.Machine.DesktopGroupID).Name
+            MachineCatalog = (Get-BrokerCatalog -UUID $Session.Machine.CatalogID).Name
+             
+            }
+            $masterResponse += $filteredResponse
+        }
+        Return $masterResponse
+    }
+    Else{Return $response} 
+
+}
+
+$me = Get-ctxcloudsessiondata -user "eja0teb"
